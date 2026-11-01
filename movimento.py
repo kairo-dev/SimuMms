@@ -1,28 +1,24 @@
-# ALGORITMO DO MICROMOUSE (para o simulador_micromouse.py)
+# MICROMOUSE - LOGICA DE MOVIMENTO (X TUR)
 #
-# Como o robô "enxerga": SÓ tem 3 sensores de parede (frente, esquerda, direita),
-# exatamente como um micromouse de verdade. O mapa NÃO é fornecido (o guia do X TUR
-# proíbe passar informações do maze para o robô), então o robô precisa:
-#   1) RECONHECIMENTO: explorar o labirinto e montar o próprio mapa;
-#   2) CORRIDA RÁPIDA: usar o mapa aprendido e ir pelo caminho mais rápido.
+# Codigo no formato em que roda no robo:
 #
-# O simulador chama duas funções:
-#   iniciar(tipo_corrida, tamanho)  -> no começo de cada corrida (robô no quadrado
-#                                      inicial, virado para o NORTE)
-#   decidir(sensores)               -> a cada passo; devolve UMA ação:
-#         'F' = andar uma célula para frente
-#         'E' = girar 90° para a esquerda
-#         'D' = girar 90° para a direita
-#         'P' = parar (encerra a corrida)
+#   * class Hardware  -> UNICA parte que depende de componentes fisicos
+#                        (sensores de parede, motores, chaves seletoras).
+#                        No robo real, preencha cada metodo com o seu codigo.
+#   * setup()         -> roda uma vez ao ligar / no inicio de cada corrida.
+#   * passo()         -> um ciclo: le sensores, decide e comanda UM movimento.
+#   * executar()      -> setup() + passo() em loop ate o robo parar.
 #
-# 'sensores' é um dict:
-#   frente / esquerda / direita : True se há parede naquele lado
-#   no_destino                  : True se o robô está na zona de destino
-#   tipo_corrida                : 'reconhecimento' ou 'rapida'
-#   tempo_restante              : segundos que ainda restam dos 10 minutos
+# O robo NAO recebe o mapa do labirinto: ele so tem 3 sensores de parede
+# (frente, esquerda, direita). Por isso:
+#   RECONHECIMENTO: explora o labirinto e monta o proprio mapa;
+#   RAPIDA:         usa o mapa aprendido e segue pelo caminho mais rapido.
+# A memoria (M) precisa sobreviver entre as corridas (RAM ligada ou EEPROM/flash):
+# o que foi aprendido no reconhecimento e usado na corrida rapida.
 #
-# A memória (M) fica guardada entre as corridas, como numa EEPROM/flash do robô:
-# o que foi aprendido no reconhecimento é usado na corrida rápida.
+# Convencao: o robo comeca no quadrado inicial, virado para o NORTE.
+#   (x, y) = (0, 0) e o quadrado inicial; x cresce para leste, y para norte.
+#   Direcoes: N=0, E=1, S=2, W=3.
 
 import heapq
 
@@ -30,54 +26,117 @@ N, E, S, W = 0, 1, 2, 3
 DX = [0, 1, 0, -1]
 DY = [1, 0, -1, 0]
 
-# Custos usados só para PLANEJAR (curvas custam tempo, então o caminho
-# com menos curvas pode ser melhor que o mais curto em células).
-T_ANDAR = 0.25
-T_GIRO = 0.12
+RECONHECIMENTO = "reconhecimento"
+RAPIDA = "rapida"
 
+# Custos relativos usados so para PLANEJAR o caminho (curva custa tempo, entao
+# o caminho com menos curvas pode ser melhor que o mais curto em celulas).
+# No robo real, ajuste com os tempos medidos de andar 1 celula e girar 90 graus.
+CUSTO_ANDAR = 0.25
+CUSTO_GIRO = 0.12
+
+
+# ============================================================================
+#  HARDWARE  (preencher no robo real)
+# ============================================================================
+class Hardware:
+    # ---- entradas ----
+    def ler_parede_frente(self):
+        """True se ha parede a frente (sensor frontal)."""
+        raise NotImplementedError
+
+    def ler_parede_esquerda(self):
+        """True se ha parede a esquerda."""
+        raise NotImplementedError
+
+    def ler_parede_direita(self):
+        """True se ha parede a direita."""
+        raise NotImplementedError
+
+    def na_zona_destino(self):
+        """True se o robo esta na zona de destino (se o robo tiver como saber)."""
+        return False
+
+    def modo_corrida(self):
+        """RECONHECIMENTO ou RAPIDA, lido de uma chave seletora do robo."""
+        return RECONHECIMENTO
+
+    def tamanho_maze(self):
+        """Lado do maze em celulas (6 ou 16), lido de uma chave seletora."""
+        return 16
+
+    # ---- saidas (cada uma bloqueia ate o movimento terminar) ----
+    def andar_celula(self):
+        """Anda uma celula (18 cm) para frente."""
+        raise NotImplementedError
+
+    def girar_esquerda(self):
+        """Gira 90 graus para a esquerda, parado no lugar."""
+        raise NotImplementedError
+
+    def girar_direita(self):
+        """Gira 90 graus para a direita, parado no lugar."""
+        raise NotImplementedError
+
+    def parar(self):
+        """Para os motores por completo."""
+        raise NotImplementedError
+
+
+hw = Hardware()
+
+
+# ============================================================================
+#  MEMORIA
+# ============================================================================
 M = {}
 
 
 def resetar_memoria():
-    """Apaga o mapa aprendido (o simulador chama ao criar um novo maze)."""
+    """Apaga o mapa aprendido."""
     M.clear()
-    M.update(paredes={}, destino=None, tam=None)
+    M.update(paredes={}, destino=None, tam=None, modo=RECONHECIMENTO)
     _zerar_pose()
 
 
 def _zerar_pose():
-    M.update(x=0, y=0, h=N, fila=[], volta_aberta=False)
+    M.update(x=0, y=0, h=N, fila=[], volta_aberta=False, no_destino=False)
 
 
 resetar_memoria()
 
 
-def iniciar(tipo_corrida, tamanho):
-    if M.get("tam") != tamanho:
+def setup():
+    """Chamar uma vez antes de cada corrida (robo no quadrado inicial)."""
+    tam = hw.tamanho_maze()
+    if M.get("tam") != tam:
         resetar_memoria()
-        M["tam"] = tamanho
+        M["tam"] = tam
     _zerar_pose()
-    M["tipo"] = tipo_corrida
+    M["modo"] = hw.modo_corrida()
 
 
-# ------------------------------------------------------------------ mapa
-
-def _registrar(x, y, h, s):
+# ============================================================================
+#  MAPA
+# ============================================================================
+def _registrar(x, y, h):
+    """Le os sensores e guarda as paredes da celula atual no mapa."""
     p = M["paredes"].setdefault((x, y), [None, None, None, None])
-    p[h] = s["frente"]
-    p[(h + 3) % 4] = s["esquerda"]
-    p[(h + 1) % 4] = s["direita"]
+    p[h] = hw.ler_parede_frente()
+    p[(h + 3) % 4] = hw.ler_parede_esquerda()
+    p[(h + 1) % 4] = hw.ler_parede_direita()
     if (x, y) == (0, 0):
         p[S] = True                      # quadrado inicial: 3 lados fechados
     if M["volta_aberta"]:
-        p[(h + 2) % 4] = False           # de onde eu vim está aberto
+        p[(h + 2) % 4] = False           # de onde eu vim esta aberto
         M["volta_aberta"] = False
-    if s.get("no_destino"):
+    M["no_destino"] = hw.na_zona_destino()
+    if M["no_destino"]:
         M["destino"] = (x, y)
 
 
 def _parede_conhecida(x, y, d):
-    """True/False se já sei, None se ainda não sei."""
+    """True/False se ja sei, None se ainda nao sei."""
     p = M["paredes"].get((x, y))
     if p is not None and p[d] is not None:
         return p[d]
@@ -94,8 +153,8 @@ def _aberto(x, y, d):
 
 
 def _planejar(origem, eh_alvo):
-    """Dijkstra sobre (x, y, direção) usando só o que já foi mapeado.
-    Devolve a lista de ações até a célula mais barata que satisfaz eh_alvo."""
+    """Dijkstra sobre (x, y, direcao) usando so o que ja foi mapeado.
+    Devolve a lista de acoes ate a celula mais barata que satisfaz eh_alvo."""
     x0, y0, _ = origem
     dist = {origem: 0.0}
     prev = {}
@@ -111,9 +170,9 @@ def _planejar(origem, eh_alvo):
                 e, a = prev[e]
                 acoes.append(a)
             return acoes[::-1]
-        viz = [("E", (x, y, (h + 3) % 4), T_GIRO), ("D", (x, y, (h + 1) % 4), T_GIRO)]
+        viz = [("E", (x, y, (h + 3) % 4), CUSTO_GIRO), ("D", (x, y, (h + 1) % 4), CUSTO_GIRO)]
         if _aberto(x, y, h):
-            viz.append(("F", (x + DX[h], y + DY[h], h), T_ANDAR))
+            viz.append(("F", (x + DX[h], y + DY[h], h), CUSTO_ANDAR))
         for a, ne, custo in viz:
             nc = c + custo
             if nc < dist.get(ne, 1e18):
@@ -123,46 +182,68 @@ def _planejar(origem, eh_alvo):
     return None
 
 
-# ------------------------------------------------------------------ decisão
-
-def _executar(acao):
-    """Atualiza a pose estimada (odometria) e devolve a ação."""
-    if acao == "F":
-        M["x"] += DX[M["h"]]
-        M["y"] += DY[M["h"]]
-        M["volta_aberta"] = True
-    elif acao == "D":
-        M["h"] = (M["h"] + 1) % 4
-    elif acao == "E":
-        M["h"] = (M["h"] + 3) % 4
-    return acao
-
-
-def decidir(s):
-    x, y, h = M["x"], M["y"], M["h"]
-    _registrar(x, y, h, s)
-    tipo = s["tipo_corrida"]
-
-    # --- corrida rápida com o destino já conhecido: segue o plano ótimo
-    if tipo == "rapida":
-        if s.get("no_destino"):
-            return "P"                   # chegou: tem que PARAR por completo
+# ============================================================================
+#  DECISAO
+# ============================================================================
+def _decidir(x, y, h):
+    """Devolve 'F' (andar), 'E' (girar esq.), 'D' (girar dir.) ou 'P' (parar)."""
+    # corrida rapida com o destino conhecido: segue o plano ideal
+    if M["modo"] == RAPIDA:
+        if M["no_destino"]:
+            return "P"                   # chegou: precisa PARAR por completo
         if M["destino"] is not None:
             if not M["fila"]:
                 M["fila"] = _planejar((x, y, h), lambda c: c == M["destino"]) or []
             if M["fila"]:
-                return _executar(M["fila"].pop(0))
-        # sem mapa: explora até achar o destino (corrida lenta, mas válida)
+                return M["fila"].pop(0)
+        # sem mapa: explora ate achar o destino (lento, mas valido)
 
-    # --- exploração: vai até a célula ainda não visitada mais "barata"
+    # exploracao: vai para a celula ainda nao visitada mais "barata"
     visitadas = M["paredes"]
     acoes = _planejar((x, y, h), lambda c: c not in visitadas)
     if acoes:
-        return _executar(acoes[0])
+        return acoes[0]
 
-    # --- tudo explorado: volta ao início e para
+    # tudo explorado: volta ao inicio e para
     if (x, y) != (0, 0):
         acoes = _planejar((x, y, h), lambda c: c == (0, 0))
         if acoes:
-            return _executar(acoes[0])
+            return acoes[0]
     return "P"
+
+
+def _executar(acao):
+    """Comanda os motores e atualiza a pose estimada (odometria por contagem)."""
+    if acao == "F":
+        hw.andar_celula()
+        M["x"] += DX[M["h"]]
+        M["y"] += DY[M["h"]]
+        M["volta_aberta"] = True
+    elif acao == "D":
+        hw.girar_direita()
+        M["h"] = (M["h"] + 1) % 4
+    elif acao == "E":
+        hw.girar_esquerda()
+        M["h"] = (M["h"] + 3) % 4
+    else:
+        hw.parar()
+
+
+def passo():
+    """Um ciclo do robo. Devolve False quando o robo parou."""
+    x, y, h = M["x"], M["y"], M["h"]
+    _registrar(x, y, h)
+    acao = _decidir(x, y, h)
+    _executar(acao)
+    return acao != "P"
+
+
+def executar():
+    """Programa principal do robo."""
+    setup()
+    while passo():
+        pass
+
+
+if __name__ == "__main__":
+    executar()
