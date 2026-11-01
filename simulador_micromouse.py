@@ -31,6 +31,10 @@ Controles:  R reconhecimento | F corrida rapida | ESPACO pausa | X retirar robo
             N novo maze | T troca fase (6x6 / 16x16) | G mostra/oculta destino
             V mapa explorado | + / - velocidade | ESC sai
 
+O codigo do robo (movimento.py) roda aqui exatamente como no robo: ele so usa a
+classe Hardware (sensores de parede, motores, chaves). O simulador fornece um
+HardwareSimulado no lugar do hardware real.
+
 Uso:  python simulador_micromouse.py [--movimento modulo] [--fase final]
                                      [--semente 123] [--teste 5]
 """
@@ -147,7 +151,7 @@ class Labirinto:
             vis[nx][ny] = True
             pilha.append((nx, ny))
 
-    def _candidatas_remocao(self):
+    def _paredes_removiveis(self):
         n, c = self.n, []
         for x in range(n):
             for y in range(1, n):
@@ -216,18 +220,18 @@ def criar_labirinto(n, rng):
     for _ in range(500):
         lab = Labirinto(n)
         lab._carvar(rng)
-        cand = lab._candidatas_remocao()
-        rng.shuffle(cand)
+        rem = lab._paredes_removiveis()
+        rng.shuffle(rem)
         i = 0
-        for _ in range(int(len(cand) * (0.10 if n > 8 else 0.08))):
-            lab._remover(*cand[i])
+        for _ in range(int(len(rem) * (0.10 if n > 8 else 0.08))):
+            lab._remover(*rem[i])
             i += 1
-        while i < len(cand) * 0.45:
+        while i < len(rem) * 0.45:
             dest = lab._escolher_destino(rng)
             if dest:
                 lab.destino = dest
                 return lab
-            lab._remover(*cand[i])
+            lab._remover(*rem[i])
             i += 1
     raise RuntimeError("Nao consegui gerar um maze valido")
 
@@ -255,11 +259,57 @@ def tempo_otimo(lab):
 
 
 # ----------------------------------------------------------------------------
+# Hardware simulado (substitui movimento.Hardware)
+# ----------------------------------------------------------------------------
+class HardwareSimulado:
+    def __init__(self, sim):
+        self.sim = sim
+        self.modo = "reconhecimento"
+        self.pedido = None              # ultima acao comandada pelo robo
+
+    def ler_parede_frente(self):
+        s = self.sim
+        return s.lab.parede(s.x, s.y, s.h)
+
+    def ler_parede_esquerda(self):
+        s = self.sim
+        return s.lab.parede(s.x, s.y, (s.h + 3) % 4)
+
+    def ler_parede_direita(self):
+        s = self.sim
+        return s.lab.parede(s.x, s.y, (s.h + 1) % 4)
+
+    def na_zona_destino(self):
+        s = self.sim
+        return SENSOR_DESTINO and (s.x, s.y) == s.lab.destino
+
+    def modo_corrida(self):
+        return self.modo
+
+    def tamanho_maze(self):
+        return self.sim.n
+
+    def andar_celula(self):
+        self.pedido = "F"
+
+    def girar_esquerda(self):
+        self.pedido = "E"
+
+    def girar_direita(self):
+        self.pedido = "D"
+
+    def parar(self):
+        self.pedido = "P"
+
+
+# ----------------------------------------------------------------------------
 # Simulacao (logica, sem pygame)
 # ----------------------------------------------------------------------------
 class Simulacao:
     def __init__(self, mov, fase="classificatoria", semente=None):
         self.mov = mov
+        self.hw = HardwareSimulado(self)
+        self.mov.hw = self.hw           # o robo passa a usar o hardware simulado
         self.fase = fase
         self.vel = 4.0
         self.pausado = False
@@ -310,11 +360,11 @@ class Simulacao:
         self.trilha = [(0, 0)]
         self.corrida = dict(tipo=tipo, t=0.0, cron=False, chegou=False, t_chegada=None, batidas=0)
         try:
-            if hasattr(self.mov, "iniciar"):
-                self.mov.iniciar(tipo, self.n)
+            self.hw.modo = tipo
+            self.mov.setup()
         except Exception:
             traceback.print_exc()
-            self._encerrar_invalida("Erro em movimento.iniciar() (veja o terminal).")
+            self._encerrar_invalida("Erro em movimento.setup() (veja o terminal).")
             return
         self._log("Corrida de %s iniciada." % ("reconhecimento" if tipo == "reconhecimento" else "RÁPIDA"))
 
@@ -339,30 +389,18 @@ class Simulacao:
         self.x = self.y = self.h = 0
 
     # -- passo da simulacao ---------------------------------------------------
-    def _sensores(self):
-        x, y, h, lab = self.x, self.y, self.h, self.lab
-        s = {
-            "frente": lab.parede(x, y, h),
-            "esquerda": lab.parede(x, y, (h + 3) % 4),
-            "direita": lab.parede(x, y, (h + 1) % 4),
-            "tipo_corrida": self.corrida["tipo"],
-            "tempo_restante": self.tempo_restante,
-        }
-        if SENSOR_DESTINO:
-            s["no_destino"] = (x, y) == lab.destino
-        return s
-
     def _proxima_acao(self):
         c, lab = self.corrida, self.lab
+        self.hw.pedido = None
         try:
-            a = self.mov.decidir(self._sensores())
+            self.mov.passo()
         except Exception:
             traceback.print_exc()
-            self._encerrar_invalida("Erro em movimento.decidir() (veja o terminal).")
+            self._encerrar_invalida("Erro em movimento.passo() (veja o terminal).")
             return
-        a = str(a).strip().upper()[:1] if a is not None else ""
+        a = self.hw.pedido
         if a not in ("F", "E", "D", "P"):
-            self._encerrar_invalida("Ação inválida devolvida pelo robô: %r" % a)
+            self._encerrar_invalida("O robô não comandou nenhum movimento em passo().")
             return
         if a == "P":
             self._parar()
@@ -854,7 +892,7 @@ class Interface:
 def main():
     ap = argparse.ArgumentParser(description="Simulador de Micromouse (X TUR)")
     ap.add_argument("--movimento", default="movimento",
-                    help="modulo Python com iniciar() e decidir() (padrão: movimento)")
+                    help="modulo Python do robo com setup() e passo() (padrão: movimento)")
     ap.add_argument("--fase", choices=list(TAMANHOS), default="classificatoria")
     ap.add_argument("--semente", type=int, default=None)
     ap.add_argument("--teste", type=int, nargs="?", const=5, default=None,
